@@ -514,13 +514,21 @@ def get_pattern():
 
 
 def parse_mongo_db_arg(mongo_db):
+    import pymongo
+
+    try:
+        client = pymongo.MongoClient(mongo_db)
+        client.close()
+    except Exception:
+        pass
+    else:
+        return {"url": mongo_db}
     g = re.match(get_pattern(), mongo_db).groupdict()
     if g is None:
         raise ValueError(
             'mongo_db argument must have the form "db_name" '
             'or "host:port[:db_name]" but was {}'.format(mongo_db)
         )
-
     kwargs = {}
     if g["host1"]:
         kwargs["url"] = "{}:{}".format(g["host1"], g["port1"])

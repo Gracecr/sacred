@@ -5,7 +5,7 @@ import json
 import os
 
 import sqlalchemy as sa
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, Session
 from sqlalchemy.ext.declarative import declarative_base
 
 from sacred.dependencies import get_digest
@@ -241,14 +241,35 @@ class Experiment(Base):
         }
 
 
+class MetricAssociation(Base):
+    __tablename__ = "metric_association"
+
+    dependent_id = sa.Column(
+        sa.Integer, sa.ForeignKey("metric.metric_id"), primary_key=True
+    )
+    independent_id = sa.Column(
+        sa.Integer, sa.ForeignKey("metric.metric_id"), primary_key=True
+    )
+
+
 class Metric(Base):
     __tablename__ = "metric"
 
     @classmethod
-    def create(cls, metric_name: str, metric_info: dict, session):
+    def create(cls, run, metric_name: str, metric_info: dict, session: Session):
+        dependencies = list(
+            session.execute(
+                sa.select(Metric).where(
+                    Metric.run == run, Metric.name.in_(metric_info["depends_on"])
+                )
+            ).scalars()
+        )
+        print(dependencies)
         metric = Metric(
+            run=run,
             name=metric_name,
             units=metric_info["units"],
+            depends_on=dependencies,
         )
         metric.steps.extend(
             [
@@ -272,7 +293,7 @@ class Metric(Base):
         return metric
 
     metric_id = sa.Column(sa.Integer, primary_key=True)
-    name = sa.Column(sa.String)
+    name = sa.Column(sa.String, sa.UniqueConstraint())
     steps: list[MetricStep] = relationship("MetricStep")
     values: list[MetricValue] = relationship("MetricValue")
     timestamps: list[MetricTimestamp] = relationship("MetricTimestamp")
@@ -280,6 +301,12 @@ class Metric(Base):
     # British thermal unit (international table) inch per second square-foot degree Fahrenheit
     # is the longest unit name in the UNECE's list at 88 characters
     units = sa.Column(sa.String)
+    depends_on: list[Metric] = relationship(
+        "Metric",
+        secondary="metric_association",
+        primaryjoin=metric_id == MetricAssociation.independent_id,
+        secondaryjoin=metric_id == MetricAssociation.dependent_id,
+    )
 
     run_id = sa.Column(sa.String(24), sa.ForeignKey("run.run_id"))
     run = relationship("Run", back_populates="metrics")

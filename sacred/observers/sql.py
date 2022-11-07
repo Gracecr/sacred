@@ -167,8 +167,7 @@ class SqlObserver(RunObserver):
 
         # Handle newly created metrics
         for metric_name, metric_info in metrics_by_name_copy.items():
-            metric = Metric.create(metric_name, metric_info, self.session)
-            self.run.metrics.append(metric)
+            metric = Metric.create(self.run, metric_name, metric_info, self.session)
         self.save()
 
     def save(self):

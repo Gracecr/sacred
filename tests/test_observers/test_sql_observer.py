@@ -378,3 +378,29 @@ def test_log_metrics(sql_obs: SqlObserver, sample_run, logged_metrics, session):
     units = next(metric for metric in db_run.metrics if metric.name == "training.units")
     assert units.values[0].value == 1
     assert units.units == "meter"
+
+    # Attempt to insert a metric with dependencies
+    sql_obs.log_metrics(
+        linearize_metrics(
+            [
+                ScalarMetricLogEntry(
+                    "training.depends_on_units",
+                    1,
+                    datetime.datetime.utcnow(),
+                    1,
+                    depends_on=["training.units"],
+                )
+            ]
+        ),
+        info,
+    )
+    sql_obs.heartbeat_event(info=info, captured_out=outp, beat_time=T1, result=0)
+    assert session.query(Metric).count() == 6
+    db_run = session.get(Run, sql_obs.run.id)
+    depends_on_units = next(
+        metric
+        for metric in db_run.metrics
+        if metric.name == "training.depends_on_units"
+    )
+    assert len(depends_on_units.depends_on) == 1
+    assert depends_on_units.depends_on[0].name == "training.units"

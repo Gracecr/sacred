@@ -1,4 +1,6 @@
-from typing import Generator, Tuple, Union
+from __future__ import annotations
+
+from typing import Callable, Generator, Tuple, Union
 import inspect
 import os.path
 from sacred.utils import PathType
@@ -50,6 +52,7 @@ class Ingredient:
         _caller_globals: Optional[dict] = None,
         base_dir: Optional[PathType] = None,
         save_git_info: bool = True,
+        requirements: list[Callable[[], bool]] = (),
     ):
         self.path = path
         self.config_hooks = []
@@ -59,7 +62,7 @@ class Ingredient:
         self.logger = None
         self.captured_functions = []
         self.post_run_hooks = []
-        self.pre_run_hooks = []
+        self.pre_run_hooks = [self.validate_requirements]
         self._is_traversing = False
         self.commands = OrderedDict()
         # capture some context information
@@ -75,6 +78,7 @@ class Ingredient:
         ) = gather_sources_and_dependencies(
             _caller_globals, save_git_info, self.base_dir
         )
+        self.requirements = list(requirements)
         if self.mainfile is None and not interactive:
             raise RuntimeError(
                 "Defining an experiment in interactive mode! "
@@ -390,3 +394,19 @@ class Ingredient:
                 for ingred, depth in ingredient.traverse_ingredients():
                     yield ingred, depth + 1
         self._is_traversing = False
+
+    def validate_requirements(self) -> bool:
+        """Validate that the requirements are met.
+
+        Raises
+        ------
+            Exception: When a requirement is not met.
+
+        Returns
+        -------
+            bool: True if all requirements are met.
+        """
+        for requirement in self.requirements:
+            if not requirement():
+                raise Exception(f"Requirement Not Met: {requirement}")
+        return True

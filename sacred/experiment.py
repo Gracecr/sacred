@@ -1,10 +1,12 @@
 """The Experiment class, which is central to sacred."""
+from __future__ import annotations
+
 import inspect
 import os.path
 import sys
 import warnings
 from collections import OrderedDict
-from typing import Sequence, Optional, List
+from typing import Callable, Sequence, Optional, List
 
 from docopt import docopt, printable_usage
 
@@ -61,6 +63,7 @@ class Experiment(Ingredient):
         additional_host_info: Optional[List[HostInfoGetter]] = None,
         additional_cli_options: Optional[Sequence[CLIOption]] = None,
         save_git_info: bool = True,
+        requirements: list[Callable[[], bool]] = (),
     ):
         """
         Create a new experiment with the given name and optional ingredients.
@@ -123,6 +126,7 @@ class Experiment(Ingredient):
             base_dir=base_dir,
             _caller_globals=caller_globals,
             save_git_info=save_git_info,
+            requirements=requirements,
         )
         self.default_command = None
         self.command(print_config, unobserved=True)

@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import hashlib
 import json
 import os
 
 import sqlalchemy as sa
+from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 
 from sacred.dependencies import get_digest
@@ -92,7 +95,7 @@ class Artifact(Base):
     content = sa.Column(sa.LargeBinary)
 
     run_id = sa.Column(sa.String(24), sa.ForeignKey("run.run_id"))
-    run = sa.orm.relationship("Run", backref=sa.orm.backref("artifacts"))
+    run = relationship("Run", back_populates="artifacts")
 
     def to_json(self):
         return {"_id": self.artifact_id, "filename": self.filename}
@@ -142,6 +145,7 @@ class Host(Base):
     os = sa.Column(sa.String(16))
     os_info = sa.Column(sa.String(64))
     python_version = sa.Column(sa.String(16))
+    runs: list[Run] = relationship("Run", back_populates="host")
 
     def to_json(self):
         return {
@@ -217,13 +221,13 @@ class Experiment(Base):
     name = sa.Column(sa.String(32))
     md5sum = sa.Column(sa.String(32))
     base_dir = sa.Column(sa.String(64))
-    sources = sa.orm.relationship(
+    sources = relationship(
         "Source", secondary=experiment_source_association, backref="experiments"
     )
-    repositories = sa.orm.relationship(
+    repositories = relationship(
         "Repository", secondary=experiment_repository_association, backref="experiments"
     )
-    dependencies = sa.orm.relationship(
+    dependencies = relationship(
         "Dependency", secondary=experiment_dependency_association, backref="experiments"
     )
 
@@ -235,6 +239,80 @@ class Experiment(Base):
             "repositories": [r.to_json() for r in self.repositories],
             "dependencies": [d.to_json() for d in self.dependencies],
         }
+
+
+class Metric(Base):
+    __tablename__ = "metric"
+
+    @classmethod
+    def create(cls, metric_name: str, metric_info: dict, session):
+        metric = Metric(
+            name=metric_name,
+            units=metric_info["units"],
+        )
+        metric.steps.extend(
+            [
+                MetricStep(metric_id=metric.metric_id, step=step)
+                for step in metric_info["steps"]
+            ]
+        )
+        metric.values.extend(
+            [
+                MetricValue(metric_id=metric.metric_id, value=value)
+                for value in metric_info["values"]
+            ]
+        )
+        metric.timestamps.extend(
+            [
+                MetricTimestamp(metric_id=metric.metric_id, timestamp=timestamp)
+                for timestamp in metric_info["timestamps"]
+            ]
+        )
+
+        return metric
+
+    metric_id = sa.Column(sa.Integer, primary_key=True)
+    name = sa.Column(sa.String)
+    steps: list[MetricStep] = relationship("MetricStep")
+    values: list[MetricValue] = relationship("MetricValue")
+    timestamps: list[MetricTimestamp] = relationship("MetricTimestamp")
+    # Fun fact:
+    # British thermal unit (international table) inch per second square-foot degree Fahrenheit
+    # is the longest unit name in the UNECE's list at 88 characters
+    units = sa.Column(sa.String)
+
+    run_id = sa.Column(sa.String(24), sa.ForeignKey("run.run_id"))
+    run = relationship("Run", back_populates="metrics")
+
+    def to_json(self):
+        return {
+            "name": self.name,
+            "values": [value.value for value in self.values],
+            "steps": [step.step for step in self.steps],
+            "timestamps": [d.timestamp.isoformat() for d in self.timestamps],
+            "units": self.units,
+        }
+
+
+class MetricValue(Base):
+    __tablename__ = "metric_value"
+    id = sa.Column(sa.Integer, primary_key=True)
+    metric_id = sa.Column(sa.Integer, sa.ForeignKey("metric.metric_id"))
+    value = sa.Column(sa.Float)
+
+
+class MetricStep(Base):
+    __tablename__ = "metric_step"
+    id = sa.Column(sa.Integer, primary_key=True)
+    metric_id = sa.Column(sa.Integer, sa.ForeignKey("metric.metric_id"))
+    step = sa.Column(sa.Float)
+
+
+class MetricTimestamp(Base):
+    __tablename__ = "metric_timestamp"
+    id = sa.Column(sa.Integer, primary_key=True)
+    metric_id = sa.Column(sa.Integer, sa.ForeignKey("metric.metric_id"))
+    timestamp = sa.Column(sa.DateTime)
 
 
 run_resource_association = sa.Table(
@@ -286,16 +364,17 @@ class Run(Base):
     )
 
     host_id = sa.Column(sa.Integer, sa.ForeignKey("host.host_id"))
-    host = sa.orm.relationship("Host", backref=sa.orm.backref("runs"))
+    host: Host = relationship("Host", back_populates="runs")
 
     experiment_id = sa.Column(sa.Integer, sa.ForeignKey("experiment.experiment_id"))
-    experiment = sa.orm.relationship("Experiment", backref=sa.orm.backref("runs"))
+    experiment = relationship("Experiment", backref=sa.orm.backref("runs"))
 
-    # artifacts = backref
-    resources = sa.orm.relationship(
+    artifacts: list[Artifact] = relationship("Artifact", back_populates="run")
+
+    resources: list[Resource] = relationship(
         "Resource", secondary=run_resource_association, backref="runs"
     )
-
+    metrics: list[Metric] = relationship("Metric", back_populates="run")
     result = sa.Column(sa.Float)
 
     def to_json(self):
@@ -311,6 +390,7 @@ class Run(Base):
             "meta": {"comment": self.comment, "priority": self.priority},
             "resources": [r.to_json() for r in self.resources],
             "artifacts": [a.to_json() for a in self.artifacts],
+            "metrics": [m.to_json() for m in self.metrics],
             "host": self.host.to_json(),
             "experiment": self.experiment.to_json(),
             "config": restore(json.loads(self.config)),

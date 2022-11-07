@@ -3,14 +3,24 @@
 
 
 import datetime
+import pint
 
 import pytest
+from sacred.metrics_logger import ScalarMetricLogEntry, linearize_metrics
 from sacred.serializer import json
 
 sqlalchemy = pytest.importorskip("sqlalchemy")
 
 from sacred.observers.sql import SqlObserver
-from sacred.observers.sql_bases import Host, Experiment, Run, Source, Resource
+from sacred.observers.sql_bases import (
+    Base,
+    Host,
+    Experiment,
+    Run,
+    Source,
+    Resource,
+    Metric,
+)
 
 
 T1 = datetime.datetime(1999, 5, 4, 3, 2, 1, 0)
@@ -40,6 +50,8 @@ def session(engine):
     yield session
     session.close()
     trans.rollback()
+    # Postgres does not support nested transactions in the same way SQLite does
+    Base.metadata.drop_all(connection)
     connection.close()
 
 
@@ -84,7 +96,7 @@ def test_sql_observer_started_event_creates_run(sql_obs, sample_run, session):
     assert session.query(Run).count() == 1
     assert session.query(Host).count() == 1
     assert session.query(Experiment).count() == 1
-    run = session.query(Run).first()
+    run: Run = session.query(Run).first()
     assert run.to_json() == {
         "_id": _id,
         "command": sample_run["command"],
@@ -97,6 +109,7 @@ def test_sql_observer_started_event_creates_run(sql_obs, sample_run, session):
         "meta": {"comment": sample_run["meta_info"]["comment"], "priority": 0.0},
         "resources": [],
         "artifacts": [],
+        "metrics": [],
         "host": sample_run["host_info"],
         "experiment": sample_run["ex_info"],
         "config": sample_run["config"],
@@ -244,3 +257,124 @@ def test_sql_observer_equality(sql_obs, engine, session):
 
     assert not sql_obs == "foo"
     assert sql_obs != "foo"
+
+
+@pytest.fixture
+def logged_metrics():
+    return [
+        ScalarMetricLogEntry("training.loss", 10, datetime.datetime.utcnow(), 1),
+        ScalarMetricLogEntry("training.loss", 20, datetime.datetime.utcnow(), 2),
+        ScalarMetricLogEntry("training.loss", 30, datetime.datetime.utcnow(), 3),
+        ScalarMetricLogEntry("training.accuracy", 10, datetime.datetime.utcnow(), 100),
+        ScalarMetricLogEntry("training.accuracy", 20, datetime.datetime.utcnow(), 200),
+        ScalarMetricLogEntry("training.accuracy", 30, datetime.datetime.utcnow(), 300),
+        ScalarMetricLogEntry("training.loss", 40, datetime.datetime.utcnow(), 10),
+        ScalarMetricLogEntry("training.loss", 50, datetime.datetime.utcnow(), 20),
+        ScalarMetricLogEntry("training.loss", 60, datetime.datetime.utcnow(), 30),
+    ]
+
+
+def test_log_metrics(sql_obs: SqlObserver, sample_run, logged_metrics, session):
+    """
+    Test storing scalar measurements
+
+    Test whether measurements logged using _run.metrics.log_scalar_metric
+    are being stored in the 'metrics' table
+    and that the metrics have a valid reference to the associtaed 'run'.
+
+    Metrics are identified by name (e.g.: 'training.loss') and by the
+    experiment run that produced them. Each metric contains a list of x values
+    (e.g. iteration step), y values (measured values) and timestamps of when
+    each of the measurements was taken.
+    """
+
+    # Start the experiment
+    sql_obs.started_event(**sample_run)
+
+    # Initialize the info dictionary and standard output with arbitrary values
+    info = {"my_info": [1, 2, 3], "nr": 7}
+    outp = "some output"
+
+    # Take first 6 measured events, group them by metric name
+    # and store the measured series to the 'metrics' collection
+    # and reference the newly created records in the 'info' dictionary.
+    sql_obs.log_metrics(linearize_metrics(logged_metrics[:6]), info)
+    # Call standard heartbeat event (store the info dictionary to the database)
+    sql_obs.heartbeat_event(info=info, captured_out=outp, beat_time=T1, result=0)
+
+    # There should be only one run stored
+    assert session.query(Run).count() == 1
+    db_run = session.query(Run).first()
+
+    # The metrics, stored in the metrics table,
+    # should be two (training.loss and training.accuracy)
+    assert len(db_run.metrics) == 2
+    loss = next(metric for metric in db_run.metrics if metric.name == "training.loss")
+    assert [step.step for step in loss.steps] == [10, 20, 30]
+    assert [value.value for value in loss.values] == [1, 2, 3]
+    for i in range(len(loss.timestamps) - 1):
+        assert loss.timestamps[i].timestamp <= loss.timestamps[i + 1].timestamp
+
+    # Read the training.accuracy metric and check the references as with the training.loss above
+    accuracy = next(
+        metric for metric in db_run.metrics if metric.name == "training.accuracy"
+    )
+    assert [step.step for step in accuracy.steps] == [10, 20, 30]
+    assert [value.value for value in accuracy.values] == [100, 200, 300]
+
+    # Now, process the remaining events
+    # The metrics shouldn't be overwritten, but appended instead.
+    sql_obs.log_metrics(linearize_metrics(logged_metrics[6:]), info)
+    sql_obs.heartbeat_event(info=info, captured_out=outp, beat_time=T2, result=0)
+
+    assert session.query(Run).count() == 1
+    db_run = session.query(Run).first()
+
+    # The newly added metrics belong to the same run and have the same names, so the total number
+    # of metrics should not change.
+    assert len(db_run.metrics) == 2
+    loss = next(metric for metric in db_run.metrics if metric.name == "training.loss")
+    # ... but the values should be appended to the original list
+    assert [step.step for step in loss.steps] == [10, 20, 30, 40, 50, 60]
+    assert [value.value for value in loss.values] == [1, 2, 3, 10, 20, 30]
+    for i in range(len(loss.timestamps) - 1):
+        assert loss.timestamps[i].timestamp <= loss.timestamps[i + 1].timestamp
+
+    accuracy = next(
+        metric for metric in db_run.metrics if metric.name == "training.accuracy"
+    )
+    assert [step.step for step in accuracy.steps] == [10, 20, 30]
+    assert [value.value for value in accuracy.values] == [100, 200, 300]
+
+    # Make sure that when starting a new experiment, new records in metrics are created
+    # instead of appending to the old ones.
+    sample_run["_id"] = "NEWID"
+    # Start the experiment
+    sql_obs.started_event(**sample_run)
+    sql_obs.log_metrics(linearize_metrics(logged_metrics[:4]), info)
+    sql_obs.heartbeat_event(info=info, captured_out=outp, beat_time=T1, result=0)
+    # A new run has been created
+    assert session.query(Run).count() == 2
+    # Another 2 metrics have been created
+    assert session.query(Metric).count() == 4
+
+    # Attempt to insert a metric with units
+    sql_obs.log_metrics(
+        linearize_metrics(
+            [
+                ScalarMetricLogEntry(
+                    "training.units",
+                    1,
+                    datetime.datetime.utcnow(),
+                    pint.Quantity(1, "meter"),
+                )
+            ]
+        ),
+        info,
+    )
+    sql_obs.heartbeat_event(info=info, captured_out=outp, beat_time=T1, result=0)
+    assert session.query(Metric).count() == 5
+    db_run = session.get(Run, sql_obs.run.id)
+    units = next(metric for metric in db_run.metrics if metric.name == "training.units")
+    assert units.values[0].value == 1
+    assert units.units == "meter"

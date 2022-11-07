@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
+from __future__ import annotations
+import copy
 
 import json
 from threading import Lock
@@ -134,6 +136,39 @@ class SqlObserver(RunObserver):
 
         a = Artifact.create(name, filename)
         self.run.artifacts.append(a)
+        self.save()
+
+    def log_metrics(self, metrics_by_name: dict[str, dict[str, list]], info: dict):
+        from .sql_bases import Metric, MetricStep, MetricValue, MetricTimestamp
+
+        metrics_by_name_copy = copy.copy(metrics_by_name)
+        for metric in self.run.metrics:
+            if metric.name in metrics_by_name_copy:
+                metric_info = metrics_by_name_copy[metric.name]
+                metric.steps.extend(
+                    [
+                        MetricStep(metric_id=metric.metric_id, step=step)
+                        for step in metric_info["steps"]
+                    ]
+                )
+                metric.values.extend(
+                    [
+                        MetricValue(metric_id=metric.metric_id, value=value)
+                        for value in metric_info["values"]
+                    ]
+                )
+                metric.timestamps.extend(
+                    [
+                        MetricTimestamp(metric_id=metric.metric_id, timestamp=timestamp)
+                        for timestamp in metric_info["timestamps"]
+                    ]
+                )
+                del metrics_by_name_copy[metric.name]
+
+        # Handle newly created metrics
+        for metric_name, metric_info in metrics_by_name_copy.items():
+            metric = Metric.create(metric_name, metric_info, self.session)
+            self.run.metrics.append(metric)
         self.save()
 
     def save(self):

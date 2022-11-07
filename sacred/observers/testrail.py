@@ -72,7 +72,7 @@ class TestRailApiObserver(RunObserver):
         self.start_time: datetime = None
         self.attachments: list[str] = []
 
-    def __get_or_create_run(self):
+    def __get_or_create_run(self) -> dict:
         from testrail_api import TestRailAPI, StatusCodeError
 
         self.api: TestRailAPI
@@ -84,10 +84,9 @@ class TestRailApiObserver(RunObserver):
                     f"TestRail Run ID {self.run_id} does not exist."
                 ) from exc
         else:
-            response = self.api.runs.add_run(self.project_id)
-            return response
+            return self.api.runs.add_run(self.project_id)
 
-    def __get_or_create_case(self, name: str = None):
+    def __get_or_create_case(self, name: str = None) -> dict:
         from testrail_api import TestRailAPI, StatusCodeError
         from testrail_api._exception import TestRailAPIError
 
@@ -104,9 +103,8 @@ class TestRailApiObserver(RunObserver):
             if len(cases) == 1:
                 return cases[0]
             if len(cases) > 1:
-                print(cases)
                 raise TestRailAPIError(f"{len(cases)} cases match {name}, expected 1.")
-            return self.api.cases.add_case(self.__get_or_create_section(), name)
+            return self.api.cases.add_case(self.__get_or_create_section()["id"], name)
 
     def __get_or_create_section(self) -> dict:
         from testrail_api import TestRailAPI
@@ -117,12 +115,12 @@ class TestRailApiObserver(RunObserver):
         self.api: TestRailAPI
         for section in self.api.sections.get_sections(self.project_id)["sections"]:
             if section["name"] == "Sacred":
-                return section["id"]
+                return section
         return self.api.sections.add_section(
             self.project_id,
             "Sacred",
             description="Automatically added by the Sacred TestRail Observer",
-        )["id"]
+        )
 
     def queued_event(
         self, ex_info, command, host_info, queue_time, config, meta_info, _id
@@ -195,7 +193,7 @@ def testrail_option(args, run):
     If Run ID is not provided, a new run will be created.
 
     Format:
-        `project=[project_id],case=[case_id],[section=[section_id]],run=[run_id]`
+        `project_id=[project_id],case_id=[case_id],[section_id=[section_id]],run_id=[run_id]`
     """
     kwargs = parse_testrail_arg(args)
     mongo = TestRailApiObserver(**kwargs)
@@ -206,14 +204,8 @@ def parse_testrail_arg(arg: str) -> tuple[int, int, int]:
     fields = arg.split(",")
     kwargs = {}
     for field in fields:
-        if field.startswith("project="):
-            kwargs["project_id"] = int(field[len("project=")])
-        elif field.startswith("case="):
-            kwargs["case_id"] = int(field[len("case=")])
-        elif field.startswith("run="):
-            kwargs["run_id"] = int(field[len("run=")])
-        elif field.startswith("section="):
-            kwargs["section_id"] = int(field[len("section=")])
+        name, value = field.split("=")
+        kwargs[name] = int(value)
 
     if "project_id" not in kwargs is None:
         raise ValueError("testrail argument project_id must be defined.")

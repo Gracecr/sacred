@@ -42,16 +42,19 @@ class TestRailApiObserver(RunObserver):
             Must be created in TestRail before use.
         case_id : int, optional
             If not included, the case will be determined using the experiment name.
-            If no case matching the experiment name exists, and `section_id` is defined, one will be created for you.
+            If no case matching the experiment name exists, one will be created. By
+            default None.
         section_id : int, optional
-            Case ID (must be created in TestRail before use)
+            Only used when `case_id` is `None`, and no case matching the experiment
+            name exists. If not defined, a "Sacred" section will be created if a new
+            case must be added. By default None.
         run_id : int, optional
             Use when continuing an existing run, by default None.
         result_field_hook : Callable[[], dict], optional
             Extra fields to include in result, by default None
         store_files : bool, optional
             True to store attachments, resources, and sources in TestRail,
-            by default False
+            by default False.
         """
         from testrail_api import TestRailAPI
 
@@ -103,8 +106,23 @@ class TestRailApiObserver(RunObserver):
             if len(cases) > 1:
                 print(cases)
                 raise TestRailAPIError(f"{len(cases)} cases match {name}, expected 1.")
-            if self.section_id:
-                return self.api.cases.add_case(self.section_id, name)
+            return self.api.cases.add_case(self.__get_or_create_section(), name)
+
+    def __get_or_create_section(self) -> dict:
+        from testrail_api import TestRailAPI
+
+        if self.section_id:
+            return self.section_id
+
+        self.api: TestRailAPI
+        for section in self.api.sections.get_sections(self.project_id)["sections"]:
+            if section["name"] == "Sacred":
+                return section["id"]
+        return self.api.sections.add_section(
+            self.project_id,
+            "Sacred",
+            description="Automatically added by the Sacred TestRail Observer",
+        )["id"]
 
     def queued_event(
         self, ex_info, command, host_info, queue_time, config, meta_info, _id
@@ -141,7 +159,7 @@ class TestRailApiObserver(RunObserver):
                 self.api.attachments.add_attachment_to_result(result["id"], filename)
 
     def completed_event(self, stop_time: datetime, result):
-        self.__upload_result(1, stop_time)
+        self.__upload_result(1 if bool(result) else 5, stop_time)
 
     def interrupted_event(self, interrupt_time: datetime, status):
         self.__upload_result(5, interrupt_time)

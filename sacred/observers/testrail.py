@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 # coding=utf-8
+from __future__ import annotations
 
 from datetime import datetime
 from typing import Callable
 
+from sacred.commandline_options import cli_option
 from sacred.observers.base import RunObserver
 
 
@@ -13,7 +15,8 @@ class TestRailApiObserver(RunObserver):
     def __init__(
         self,
         project_id: int,
-        case_id: int,
+        case_id: int = None,
+        section_id: int = None,
         run_id: int = None,
         result_field_hook: Callable[[], dict] = None,
         store_files: bool = False,
@@ -36,11 +39,14 @@ class TestRailApiObserver(RunObserver):
         Parameters
         ----------
         project_id : int
-            Project ID
-        case_id : int
+            Must be created in TestRail before use.
+        case_id : int, optional
+            If not included, the case will be determined using the experiment name.
+            If no case matching the experiment name exists, and `section_id` is defined, one will be created for you.
+        section_id : int, optional
             Case ID (must be created in TestRail before use)
         run_id : int, optional
-            Run ID if continuing an existing run, by default None
+            Use when continuing an existing run, by default None.
         result_field_hook : Callable[[], dict], optional
             Extra fields to include in result, by default None
         store_files : bool, optional
@@ -54,6 +60,7 @@ class TestRailApiObserver(RunObserver):
         self.project_id = project_id
         self.run_id = run_id
         self.case_id = case_id
+        self.section_id = section_id
         if result_field_hook:
             self.result_field_hook = result_field_hook
         else:
@@ -77,6 +84,28 @@ class TestRailApiObserver(RunObserver):
             response = self.api.runs.add_run(self.project_id)
             return response
 
+    def __get_or_create_case(self, name: str = None):
+        from testrail_api import TestRailAPI, StatusCodeError
+        from testrail_api._exception import TestRailAPIError
+
+        self.api: TestRailAPI
+        if self.case_id:
+            try:
+                return self.api.cases.get_case(self.case_id)
+            except StatusCodeError as exc:
+                raise Exception(
+                    f"TestRail Case ID {self.case_id} does not exist."
+                ) from exc
+        else:
+            cases = self.api.cases.get_cases(self.project_id, filter=name)["cases"]
+            if len(cases) == 1:
+                return cases[0]
+            if len(cases) > 1:
+                print(cases)
+                raise TestRailAPIError(f"{len(cases)} cases match {name}, expected 1.")
+            if self.section_id:
+                return self.api.cases.add_case(self.section_id, name)
+
     def queued_event(
         self, ex_info, command, host_info, queue_time, config, meta_info, _id
     ):
@@ -89,6 +118,8 @@ class TestRailApiObserver(RunObserver):
         self, ex_info, command, host_info, start_time, config, meta_info, _id
     ):
         self.start_time = start_time
+        case = self.__get_or_create_case(ex_info["name"])
+        self.case_id = case["id"]
 
     def heartbeat_event(self, info, captured_out, beat_time, result):
         pass
@@ -128,3 +159,44 @@ class TestRailApiObserver(RunObserver):
 
     def log_metrics(self, metrics_by_name, info):
         pass
+
+
+@cli_option("-r", "--testrail")
+def testrail_option(args, run):
+    """Add a TestRail Observer to the experiment.
+
+    The argument value is the project ID, Case ID, and Run ID.
+
+    Project ID is required.
+
+    If Case ID is not provided, the TestRail observer will look for a case with a title
+    matching your experiment. If more than 1 case are found, an Exception willl be
+    thrown. If no case is found and section ID is defined, a case will be created.
+    If no case is found and section ID is NOT defined, an exception will be thrown.
+
+    If Run ID is not provided, a new run will be created.
+
+    Format:
+        `project=[project_id],case=[case_id],[section=[section_id]],run=[run_id]`
+    """
+    kwargs = parse_testrail_arg(args)
+    mongo = TestRailApiObserver(**kwargs)
+    run.observers.append(mongo)
+
+
+def parse_testrail_arg(arg: str) -> tuple[int, int, int]:
+    fields = arg.split(",")
+    kwargs = {}
+    for field in fields:
+        if field.startswith("project="):
+            kwargs["project_id"] = int(field[len("project=")])
+        elif field.startswith("case="):
+            kwargs["case_id"] = int(field[len("case=")])
+        elif field.startswith("run="):
+            kwargs["run_id"] = int(field[len("run=")])
+        elif field.startswith("section="):
+            kwargs["section_id"] = int(field[len("section=")])
+
+    if "project_id" not in kwargs is None:
+        raise ValueError("testrail argument project_id must be defined.")
+    return kwargs

@@ -73,22 +73,25 @@ class TestRailApiObserver(RunObserver):
         self.attachments: list[str] = []
 
     def __get_or_create_run(self) -> dict:
-        from testrail_api import TestRailAPI, StatusCodeError
+        from testrail_api import StatusCodeError, TestRailAPI
 
         self.api: TestRailAPI
         if self.run_id:
             try:
+                print(f"Getting run: {self.run_id}...")
                 return self.api.runs.get_run(self.run_id)
             except StatusCodeError as exc:
                 raise Exception(
                     f"TestRail Run ID {self.run_id} does not exist."
                 ) from exc
+            except ConnectionError:
+                # This command seems to fail often -- retry
+                return self.api.runs.get_run(self.run_id)
         else:
             return self.api.runs.add_run(self.project_id)
 
     def __get_or_create_case(self, name: str = None) -> dict:
-        from testrail_api import TestRailAPI, StatusCodeError
-        from testrail_api._exception import TestRailAPIError
+        from testrail_api import StatusCodeError, TestRailAPI
 
         self.api: TestRailAPI
         if self.case_id:
@@ -100,10 +103,9 @@ class TestRailApiObserver(RunObserver):
                 ) from exc
         else:
             cases = self.api.cases.get_cases(self.project_id, filter=name)["cases"]
-            if len(cases) == 1:
-                return cases[0]
-            if len(cases) > 1:
-                raise TestRailAPIError(f"{len(cases)} cases match {name}, expected 1.")
+            for case in cases:
+                if case["title"] == name:
+                    return case
             return self.api.cases.add_case(self.__get_or_create_section()["id"], name)
 
     def __get_or_create_section(self) -> dict:

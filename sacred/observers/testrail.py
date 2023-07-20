@@ -84,8 +84,10 @@ class TestRailApiObserver(RunObserver):
                 raise Exception(
                     f"TestRail Run ID {self.run_id} does not exist."
                 ) from exc
-            except ConnectionError:
+            except Exception:
                 # This command seems to fail often -- retry
+                print(f"Getting run {self.run_id} failed, retrying.")
+                self.api = TestRailAPI()
                 return self.api.runs.get_run(self.run_id)
         else:
             return self.api.runs.add_run(self.project_id)
@@ -103,6 +105,7 @@ class TestRailApiObserver(RunObserver):
                 ) from exc
         else:
             cases = self.api.cases.get_cases(self.project_id, filter=name)["cases"]
+            print(f"Cases: {cases}")
             for case in cases:
                 if case["title"] == name:
                     return case

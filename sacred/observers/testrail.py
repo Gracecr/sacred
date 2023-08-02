@@ -20,6 +20,7 @@ class TestRailApiObserver(RunObserver):
         run_id: int = None,
         result_field_hook: Callable[[], dict] = None,
         store_files: bool = False,
+        template_id: int = None,
         *args,
         **kwargs,
     ) -> None:
@@ -55,6 +56,8 @@ class TestRailApiObserver(RunObserver):
         store_files : bool, optional
             True to store attachments, resources, and sources in TestRail,
             by default False.
+        template_id : int, optional
+            Template ID to use when creating new cases.
         """
         from testrail_api import TestRailAPI
 
@@ -69,6 +72,7 @@ class TestRailApiObserver(RunObserver):
         else:
             self.result_field_hook = lambda: {}
         self.store_files = store_files
+        self.template_id = template_id
         self.start_time: datetime = None
         self.attachments: list[str] = []
 
@@ -109,7 +113,12 @@ class TestRailApiObserver(RunObserver):
             for case in cases:
                 if case["title"] == name:
                     return case
-            return self.api.cases.add_case(self.__get_or_create_section()["id"], name)
+            section_id = self.__get_or_create_section()["id"]
+            if self.template_id is not None:
+                return self.api.cases.add_case(
+                    section_id, name, template_id=self.template_id
+                )
+            return self.api.cases.add_case(section_id, name)
 
     def __get_or_create_section(self) -> dict:
         from testrail_api import TestRailAPI

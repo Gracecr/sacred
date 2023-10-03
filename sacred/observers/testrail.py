@@ -154,7 +154,13 @@ class TestRailApiObserver(FileStorageObserver):
         obj_copy = obj.copy()
         clean_dict(obj_copy, lambda key: key == "__annotations__")
 
-        self.raw_attachments[filename] = json.dumps(obj, indent=2).encode()
+        self.raw_attachments[filename] = json.dumps(
+            obj,
+            indent=2,
+            default=lambda obj: obj.to_json()
+            if hasattr(obj, "to_json")
+            else "<serialization_error>",
+        ).encode()
 
     def save_file(self, filename, target_name=None):
         if target_name:

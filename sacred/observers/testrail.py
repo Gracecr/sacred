@@ -7,6 +7,7 @@ import json
 from datetime import datetime
 from typing import Callable
 
+from sacred import optional as opt
 from sacred.commandline_options import cli_option
 from sacred.observers.file_storage import FileStorageObserver
 
@@ -79,7 +80,7 @@ class TestRailApiObserver(FileStorageObserver):
         self.start_time: datetime = datetime.now()
         self.attachments: list[str] = []
         self.raw_attachments: dict[str, bytes] = {
-            "cout": bytes(),
+            "cout.txt": bytes(),
             "metrics.json": bytes(),
         }
         self.saved_metrics = {}
@@ -146,12 +147,14 @@ class TestRailApiObserver(FileStorageObserver):
 
     def _make_run_dir(self, _id):
         # Override FileStoreObserver so that no directory is made
-        pass
+        self.dir = "tmp"
 
-    def save_json(self, obj, filename):
-        self.raw_attachments[filename] = json.dumps(
-            obj, sort_keys=True, indent=2
-        ).encode()
+    def save_json(self, obj: dict, filename):
+        # Remove "__annotations__" as it's not useful and it is not serializable
+        obj_copy = obj.copy()
+        clean_dict(obj_copy, lambda key: key == "__annotations__")
+
+        self.raw_attachments[filename] = json.dumps(obj, indent=2).encode()
 
     def save_file(self, filename, target_name=None):
         if target_name:
@@ -161,7 +164,7 @@ class TestRailApiObserver(FileStorageObserver):
         self.attachments.append(filename)
 
     def save_cout(self):
-        self.raw_attachments["cout"] += self.cout[self.cout_write_cursor :].encode()
+        self.raw_attachments["cout.txt"] += self.cout[self.cout_write_cursor :].encode()
         self.cout_write_cursor = len(self.cout)
 
     def render_template(self):
@@ -191,6 +194,8 @@ class TestRailApiObserver(FileStorageObserver):
         self.case_id = case["id"]
 
     def __upload_result(self, status_id: int, end_time: datetime):
+        from testrail_api._session import METHODS
+
         elapsed = (end_time - self.start_time).seconds
         if elapsed == 0:
             elapsed = 1  # TestRail will not accept 0s elapsed time
@@ -207,9 +212,14 @@ class TestRailApiObserver(FileStorageObserver):
                 self.api.attachments.add_attachment_to_result(result["id"], filename)
             for filename in self.raw_attachments:
                 self.api.attachments._session.request(
-                    "POST",
+                    METHODS.POST,
                     f"add_attachment_to_result/{result['id']}",
-                    files={"attachment": io.BytesIO(self.raw_attachments["filename"])},
+                    files={
+                        "attachment": (
+                            filename,
+                            io.BytesIO(self.raw_attachments[filename]),
+                        )
+                    },
                 )
 
     def completed_event(self, stop_time: datetime, result):
@@ -285,3 +295,31 @@ def parse_testrail_arg(arg: str) -> tuple[int, int, int]:
     if "project_id" not in kwargs is None:
         raise ValueError("testrail argument project_id must be defined.")
     return kwargs
+
+
+# https://stackoverflow.com/a/60863629
+def clean_dict(obj, func):
+    """
+    Scrolls the entire 'obj' to delete every key for which the 'callable' returns True.
+
+    :param obj: a dictionary or a list of dictionaries to clean
+    :param func: a callable that takes a key in argument and return True for each key to delete
+    """
+    if isinstance(obj, dict):
+        # the call to `list` is useless for py2 but makes
+        # the code py2/py3 compatible
+        for key in list(obj.keys()):
+            if func(key):
+                del obj[key]
+            else:
+                clean_dict(obj[key], func)
+    elif isinstance(obj, list):
+        for i in reversed(range(len(obj))):
+            if func(obj[i]):
+                del obj[i]
+            else:
+                clean_dict(obj[i], func)
+
+    else:
+        # neither a dict nor a list, do nothing
+        pass

@@ -2,6 +2,7 @@
 # coding=utf-8
 from __future__ import annotations
 
+import io
 import json
 from datetime import datetime
 from typing import Callable
@@ -204,6 +205,12 @@ class TestRailApiObserver(FileStorageObserver):
         if self.store_files:
             for filename in self.attachments:
                 self.api.attachments.add_attachment_to_result(result["id"], filename)
+            for filename in self.raw_attachments:
+                self.api.attachments._session.request(
+                    "POST",
+                    f"add_attachment_to_result/{result['id']}",
+                    files={"attachment": io.BytesIO(self.raw_attachments["filename"])},
+                )
 
     def completed_event(self, stop_time: datetime, result):
         super().completed_event(stop_time, result)

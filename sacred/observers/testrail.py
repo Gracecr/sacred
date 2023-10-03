@@ -2,14 +2,15 @@
 # coding=utf-8
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Callable
 
 from sacred.commandline_options import cli_option
-from sacred.observers.base import RunObserver
+from sacred.observers.file_storage import FileStorageObserver
 
 
-class TestRailApiObserver(RunObserver):
+class TestRailApiObserver(FileStorageObserver):
     VERSION = "TestRailApi-7.5.3"
 
     def __init__(
@@ -59,6 +60,7 @@ class TestRailApiObserver(RunObserver):
         template_id : int, optional
             Template ID to use when creating new cases.
         """
+        super().__init__("", copy_artifacts=False, copy_sources=False)
         from testrail_api import TestRailAPI
 
         self.api = TestRailAPI(*args, **kwargs)
@@ -73,8 +75,13 @@ class TestRailApiObserver(RunObserver):
             self.result_field_hook = lambda: {}
         self.store_files = store_files
         self.template_id = template_id
-        self.start_time: datetime = None
+        self.start_time: datetime = datetime.now()
         self.attachments: list[str] = []
+        self.raw_attachments: dict[str, bytes] = {
+            "cout": bytes(),
+            "metrics.json": bytes(),
+        }
+        self.saved_metrics = {}
 
     def __get_or_create_run(self) -> dict:
         from testrail_api import StatusCodeError, TestRailAPI
@@ -96,7 +103,7 @@ class TestRailApiObserver(RunObserver):
         else:
             return self.api.runs.add_run(self.project_id)
 
-    def __get_or_create_case(self, name: str = None) -> dict:
+    def __get_or_create_case(self, name: str = "") -> dict:
         from testrail_api import StatusCodeError, TestRailAPI
 
         self.api: TestRailAPI
@@ -113,14 +120,14 @@ class TestRailApiObserver(RunObserver):
             for case in cases:
                 if case["title"] == name:
                     return case
-            section_id = self.__get_or_create_section()["id"]
+            section_id = self.__get_or_create_section()
             if self.template_id is not None:
                 return self.api.cases.add_case(
                     section_id, name, template_id=self.template_id
                 )
             return self.api.cases.add_case(section_id, name)
 
-    def __get_or_create_section(self) -> dict:
+    def __get_or_create_section(self) -> int:
         from testrail_api import TestRailAPI
 
         if self.section_id:
@@ -134,25 +141,53 @@ class TestRailApiObserver(RunObserver):
             self.project_id,
             "Sacred",
             description="Automatically added by the Sacred TestRail Observer",
-        )
+        )["id"]
 
-    def queued_event(
-        self, ex_info, command, host_info, queue_time, config, meta_info, _id
-    ):
+    def _make_run_dir(self, _id):
+        # Override FileStoreObserver so that no directory is made
         pass
 
-    def save_sources(self, ex_info):
-        return []  # TODO
+    def save_json(self, obj, filename):
+        self.raw_attachments[filename] = json.dumps(
+            obj, sort_keys=True, indent=2
+        ).encode()
+
+    def save_file(self, filename, target_name=None):
+        if target_name:
+            raise Exception(
+                "TestRailApiObserver.save_file does not support target_name"
+            )
+        self.attachments.append(filename)
+
+    def save_cout(self):
+        self.raw_attachments["cout"] += self.cout[self.cout_write_cursor :].encode()
+        self.cout_write_cursor = len(self.cout)
+
+    def render_template(self):
+        if opt.has_mako and self.template:
+            from mako.template import Template
+
+            template = Template(filename=self.template, output_encoding="utf-8")
+            report = template.render(
+                run=self.run_entry,
+                config=self.config,
+                info=self.info,
+                cout=self.cout,
+                savedir=self.dir,
+            )
+            assert isinstance(report, bytes)
+            ext = self.template.suffix
+            self.raw_attachments["report" + ext] = report
 
     def started_event(
         self, ex_info, command, host_info, start_time, config, meta_info, _id
     ):
+        super().started_event(
+            ex_info, command, host_info, start_time, config, meta_info, _id
+        )
         self.start_time = start_time
         case = self.__get_or_create_case(ex_info["name"])
         self.case_id = case["id"]
-
-    def heartbeat_event(self, info, captured_out, beat_time, result):
-        pass
 
     def __upload_result(self, status_id: int, end_time: datetime):
         elapsed = (end_time - self.start_time).seconds
@@ -171,12 +206,15 @@ class TestRailApiObserver(RunObserver):
                 self.api.attachments.add_attachment_to_result(result["id"], filename)
 
     def completed_event(self, stop_time: datetime, result):
+        super().completed_event(stop_time, result)
         self.__upload_result(1 if bool(result) else 5, stop_time)
 
     def interrupted_event(self, interrupt_time: datetime, status):
+        super().interrupted_event(interrupt_time, status)
         self.__upload_result(5, interrupt_time)
 
     def failed_event(self, fail_time: datetime, fail_trace):
+        super().failed_event(fail_time, fail_trace)
         self.__upload_result(5, fail_time)
 
     def resource_event(self, filename: str):
@@ -188,7 +226,23 @@ class TestRailApiObserver(RunObserver):
         self.attachments.append(filename)
 
     def log_metrics(self, metrics_by_name, info):
-        pass
+        for metric_name, metric_ptr in metrics_by_name.items():
+            if metric_name not in self.saved_metrics:
+                self.saved_metrics[metric_name] = metric_ptr.copy()
+                timestamps_norm = [ts.isoformat() for ts in metric_ptr["timestamps"]]
+                self.saved_metrics[metric_name]["timestamps"] = timestamps_norm
+            else:
+                self.saved_metrics[metric_name]["values"] += metric_ptr["values"]
+                self.saved_metrics[metric_name]["steps"] += metric_ptr["steps"]
+
+                # Manually convert them to avoid passing a datetime dtype handler
+                # when we're trying to convert into json.
+                timestamps_norm = [ts.isoformat() for ts in metric_ptr["timestamps"]]
+                self.saved_metrics[metric_name]["timestamps"] += timestamps_norm
+                self.saved_metrics[metric_name]["units"] = metric_ptr["units"]
+                self.saved_metrics[metric_name]["depends_on"] = metric_ptr["depends_on"]
+
+        self.save_json(self.saved_metrics, "metrics.json")
 
 
 @cli_option("-r", "--testrail")

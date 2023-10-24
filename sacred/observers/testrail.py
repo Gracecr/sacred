@@ -78,7 +78,7 @@ class TestRailApiObserver(FileStorageObserver):
         self.store_files = store_files
         self.template_id = template_id
         self.start_time: datetime = datetime.now()
-        self.attachments: list[str] = []
+        self.attachments: list[tuple[str, str]] = []
         self.raw_attachments: dict[str, bytes] = {
             "cout.txt": bytes(),
             "metrics.json": bytes(),
@@ -91,7 +91,6 @@ class TestRailApiObserver(FileStorageObserver):
         self.api: TestRailAPI
         if self.run_id:
             try:
-                print(f"Getting run: {self.run_id}...")
                 return self.api.runs.get_run(self.run_id)
             except StatusCodeError as exc:
                 raise Exception(
@@ -99,7 +98,6 @@ class TestRailApiObserver(FileStorageObserver):
                 ) from exc
             except Exception:
                 # This command seems to fail often -- retry
-                print(f"Getting run {self.run_id} failed, retrying.")
                 self.api = TestRailAPI()
                 return self.api.runs.get_run(self.run_id)
         else:
@@ -118,7 +116,6 @@ class TestRailApiObserver(FileStorageObserver):
                 ) from exc
         else:
             cases = self.api.cases.get_cases(self.project_id, filter=name)["cases"]
-            print(f"Cases: {cases}")
             for case in cases:
                 if case["title"] == name:
                     return case
@@ -167,7 +164,7 @@ class TestRailApiObserver(FileStorageObserver):
             raise Exception(
                 "TestRailApiObserver.save_file does not support target_name"
             )
-        self.attachments.append(filename)
+        self.attachments.append((filename, filename))
 
     def save_cout(self):
         self.raw_attachments["cout.txt"] += self.cout[self.cout_write_cursor :].encode()
@@ -214,18 +211,18 @@ class TestRailApiObserver(FileStorageObserver):
             **self.result_field_hook(),
         )
         if self.store_files:
-            for filename in self.attachments:
-                self.api.attachments.add_attachment_to_result(result["id"], filename)
-            for filename in self.raw_attachments:
+            for name, filename in self.attachments:
+                with open(filename, "rb") as file:
+                    self.api.attachments._session.request(
+                        METHODS.POST,
+                        f"add_attachment_to_result/{result['id']}",
+                        files={"attachment": (name, file)},
+                    )
+            for filename, data in self.raw_attachments.items():
                 self.api.attachments._session.request(
                     METHODS.POST,
                     f"add_attachment_to_result/{result['id']}",
-                    files={
-                        "attachment": (
-                            filename,
-                            io.BytesIO(self.raw_attachments[filename]),
-                        )
-                    },
+                    files={"attachment": (filename, io.BytesIO(data))},
                 )
 
     def completed_event(self, stop_time: datetime, result):
@@ -241,12 +238,12 @@ class TestRailApiObserver(FileStorageObserver):
         self.__upload_result(5, fail_time)
 
     def resource_event(self, filename: str):
-        self.attachments.append(filename)
+        self.attachments.append((filename, filename))
 
     def artifact_event(
         self, name: str, filename: str, metadata=None, content_type=None
     ):
-        self.attachments.append(filename)
+        self.attachments.append((name, filename))
 
     def log_metrics(self, metrics_by_name, info):
         for metric_name, metric_ptr in metrics_by_name.items():
